@@ -1,0 +1,90 @@
+from py2neo import Graph, Node, Relationship
+
+import pandas as pd
+
+graph = Graph("bolt://localhost:7687", auth=("neo4j", "CornellUniversity"))
+
+df = pd.read_excel("/Users/georgezhou/Downloads/patent_green_epo.xlsx")
+
+df = df.head(100)
+
+for _, row in df.iterrows():
+    # Normalize values
+    patent_id = str(row.get("appln_nr_original", "")).strip()
+    title = str(row.get("appln_title", "")).strip().replace('"', "'")
+
+    # Year from date
+    filing_date = str(row.get("earliest_filing_date", ""))
+    year = filing_date.split("-")[0].strip() if "-" in filing_date else filing_date.strip()
+
+    # Category cleanup
+    category = str(row.get("mitigation_adaptation", "")).strip().lower()
+    if category == "mitigation and adaptation":
+        category = "A & M"
+    else:
+        category = category.capitalize()
+    tx = graph.begin()
+
+
+    # Create core nodes
+    patent = Node("Patent", id=patent_id, title=title)
+    tx.merge(patent, "Patent", "id")
+
+    year_node = Node("Year", label=year)
+    tx.merge(year_node, "Year", "label")
+    tx.merge(Relationship(patent, "Applied_In", year_node))
+
+    category_node = Node("Category", label=category)
+    tx.merge(category_node, "Category", "label")
+    tx.merge(Relationship(patent, "Tagged_As", category_node))
+
+    # Inventors / Applicants
+    if pd.notna(row.get("person_name")):
+        inventors = [name.strip() for name in str(row["person_name"]).split(";")]
+        for inventor in inventors:
+             person = Node("Applicant", name=inventor)
+             tx.merge(person, "Applicant", "name")
+             tx.merge(Relationship(patent, "Filed_By", person))
+
+    # Countries
+    if pd.notna(row.get("person_ctry_code")):
+        countries = [code.strip() for code in str(row["person_ctry_code"]).split(";")]
+        for code in countries:
+            country = Node("Country", code=code)
+            tx.merge(country, "Country", "code")
+            tx.merge(Relationship(patent, "Originated_From", country))
+
+    # Sectors
+    if pd.notna(row.get("sector")):
+        sectors = [s.strip() for s in str(row["sector"]).split(";")]
+        for sector in sectors:
+            if not sector:
+                sector = "others"
+            s_node = Node("Sector", name=sector)
+            tx.merge(s_node, "Sector", "name")
+            tx.merge(Relationship(patent, "Belongs_To", s_node))
+
+
+for _, row in df.iterrows():
+    # Extract patent info
+    patent_id = str(row.get("appln_nr_original", "")).strip()
+    title_text = str(row.get("appln_title", "")).strip().replace('"', "'")
+
+    tx = graph.begin()
+
+    # Create Patent node
+    patent = Node("Patent", id=patent_id)
+    tx.merge(patent, "Patent", "id")
+
+    # OPTIONAL: Still keep title as a property
+    patent["title"] = title_text
+    tx.push(patent)
+
+    # Create Title node
+    title_node = Node("Title", name=title_text)
+    tx.merge(title_node, "Title", "name")
+
+    # Create HAS_TITLE relationship
+    tx.merge(Relationship(patent, "HAS_TITLE", title_node))
+
+    tx.commit()
